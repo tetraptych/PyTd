@@ -283,7 +283,7 @@ class RestCursor (util.Cursor):
             self.description = []
             self.types = []
             self.rowcount = -1
-            self.rownumber = None
+            self.rownumber = -1
             for column in results.expectField("columns", pulljson.ARRAY):
                 self.columns[column["name"].lower()] = index
                 type_code = self.converter.convertType(
@@ -296,7 +296,7 @@ class RestCursor (util.Cursor):
         else:
             self.columns = None
             self.description = None
-            self.rownumber = None
+            self.rownumber = -1
             self.rowcount = -1
             if self.resultSet is not None:
                 self.rowcount = results.expectField("count")

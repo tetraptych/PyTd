@@ -85,6 +85,9 @@ SQLRETURN = SQLSMALLINT
 SQLPOINTER = ctypes.c_void_p
 SQLHANDLE = ctypes.c_void_p
 
+
+SQLWCHAR_SIZE = ctypes.sizeof(SQLWCHAR)
+
 ADDR = ctypes.byref
 PTR = ctypes.POINTER
 ERROR_BUFFER_SIZE = 2 ** 10
@@ -123,9 +126,7 @@ if osType == "Darwin" or osType == "Windows" or osType.startswith('CYGWIN'):
         return s.value
 
     def _convertParam(s):
-        if s is None:
-            return None
-        return s if util.isString(s) else str(s)
+        return s if (s is None or util.isString(s)) else str(s)
 else:
     # Unix/Linux
     # Multiply by 3 as one UTF-16 character can require 3 UTF-8 bytes.
@@ -147,6 +148,7 @@ else:
         return (s if util.isString(s) else str(s)).encode('utf8')
 
     SQLWCHAR = ctypes.c_char
+    SQLWCHAR_SIZE = ctypes.sizeof(SQLWCHAR)
 
 connections = []
 
@@ -766,7 +768,7 @@ class OdbcCursor (util.Cursor):
                 paramArrays.append((SQLDOUBLE * paramSetSize)())
             else:
                 maxLen += 1
-                valueSize = SQLLEN(ctypes.sizeof(SQLWCHAR) * maxLen)
+                valueSize = SQLLEN(SQLWCHAR_SIZE * maxLen)
                 paramArrays.append(_createBuffer(paramSetSize * maxLen))
             lengthArrays.append((SQLLEN * paramSetSize)())
             for paramSetNum in range(0, paramSetSize):
@@ -808,7 +810,7 @@ class OdbcCursor (util.Cursor):
         # Rest cursor attributes.
         self.description = None
         self.rowcount = -1
-        self.rownumber = None
+        self.rownumber = -1
         self.columns = {}
         self.types = []
         self.moreResults = None
@@ -1102,35 +1104,51 @@ def _getLobData(cursor, colIndex, buf, binary):
     return val
 
 
+def _get_val_SQL_C_BINARY(cursor, col, buf, bufSize, length, rowIndex):
+    return bytearray(
+        (ctypes.c_byte * length).from_buffer(buf, bufSize * rowIndex))
+
+
+def _get_val_SQL_C_DOUBLE(cursor, col, buf, bufSize, length, rowIndex):
+    return ctypes.c_double.from_buffer(buf, bufSize * rowIndex).value
+
+
+def _get_val_SQL_WLONGVARCHAR(cursor, col, buf, bufSize, length, rowIndex):
+    return _getLobData(cursor, col, buf, False)
+
+
+def _get_val_SQL_LONGVARBINARY(cursor, col, buf, bufSize, length, rowIndex):
+    return _getLobData(cursor, col, buf, True)
+
+
+DATATYPE_TO_GET_VAL_METHOD = {
+    SQL_C_BINARY: _get_val_SQL_C_BINARY,
+    SQL_C_DOUBLE: _get_val_SQL_C_DOUBLE,
+    SQL_WLONGVARCHAR: _get_val_SQL_WLONGVARCHAR,
+    SQL_LONGVARBINARY: _get_val_SQL_LONGVARBINARY
+}
+
+
+def _getVal(dataType, cursor, col, buf, bufSize, length, rowIndex):
+    if length == SQL_NULL_DATA:
+        return None
+    elif dataType in DATATYPE_TO_GET_VAL_METHOD:
+        method = DATATYPE_TO_GET_VAL_METHOD[dataType]
+        return method(cursor, col, buf, bufSize, length, rowIndex)
+    else:
+        chBuf = SQLWCHAR * (bufSize // SQLWCHAR_SIZE)
+        return _outputStr(chBuf.from_buffer(buf, bufSize * rowIndex))
+
+
 def _getRow(cursor, buffers, bufSizes, dataTypes, indicators, rowIndex):
     """Reads a row of data from the fetched input buffers.  If the column
        type is a BLOB or CLOB, then that data is obtained via calls to
        SQLGetData."""
-    row = []
-    for col in range(1, len(cursor.description) + 1):
-        val = None
-        buf = buffers[col - 1]
-        bufSize = bufSizes[col - 1]
-        dataType = dataTypes[col - 1]
-        length = indicators[col - 1][rowIndex]
-        if length != SQL_NULL_DATA:
-            if dataType == SQL_C_BINARY:
-                val = bytearray((ctypes.c_byte * length).from_buffer(
-                    buf, bufSize * rowIndex))
-            elif dataType == SQL_C_DOUBLE:
-                val = ctypes.c_double.from_buffer(buf,
-                                                  bufSize * rowIndex).value
-            elif dataType == SQL_WLONGVARCHAR:
-                val = _getLobData(cursor, col, buf, False)
-            elif dataType == SQL_LONGVARBINARY:
-                val = _getLobData(cursor, col, buf, True)
-            else:
-                chLen = (int)(bufSize / ctypes.sizeof(SQLWCHAR))
-                chBuf = (SQLWCHAR * chLen)
-                val = _outputStr(chBuf.from_buffer(buf,
-                                                   bufSize * rowIndex))
-        row.append(val)
-    return row
+    return [
+        _getVal(dataType, cursor, col, buf, bufSize, indicator[rowIndex], rowIndex)
+        for col, (buf, bufSize, dataType, indicator)
+        in enumerate(zip(buffers, bufSizes, dataTypes, indicators))
+    ]
 
 
 def rowIterator(cursor):

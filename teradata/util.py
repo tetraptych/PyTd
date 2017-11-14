@@ -42,6 +42,7 @@ def trace(self, message, *args, **kws):
     # Yes, logger takes its '*args' as 'args'.
     if self.isEnabledFor(TRACE):
         self._log(TRACE, message, args, **kws)
+
 logging.TRACE = TRACE
 logging.Logger.trace = trace
 
@@ -99,7 +100,7 @@ class Cursor:
         self.description = None
         self.types = None
         self.iterator = None
-        self.rownumber = None
+        self.rownumber = -1
 
     def callproc(self, procname, params):
         # Abstract method, defined by convention only
@@ -125,20 +126,15 @@ class Cursor:
             size = self.arraysize
         self.fetchSize = size
         rows = []
-        count = 0
-        for row in self:
+        for count, row in enumerate(self):
             rows.append(row)
-            count += 1
             if count == size:
                 break
         return rows
 
     def fetchall(self):
         self.fetchSize = self.arraysize
-        rows = []
-        for row in self:
-            rows.append(row)
-        return rows
+        return list(self)
 
     def nextset(self):
         # Abstract method, defined by convention only
@@ -155,18 +151,17 @@ class Cursor:
 
     def __next__(self):
         self.fetchSize = self.arraysize
-        if self.iterator:
-            if self.rownumber is None:
-                self.rownumber = 0
-            else:
-                self.rownumber += 1
-            values = next(self.iterator)
-            for i in range(0, len(values)):
-                values[i] = self.converter.convertValue(
-                    self.dbType, self.types[i][0], self.types[i][1], values[i])
-            row = Row(self.columns, values, self.rownumber + 1)
-            # logger.debug("%s", row)
-            return row
+        self.rownumber += 1
+        try:
+            raw_values = next(self.iterator)
+        except AttributeError:
+            raise StopIteration()
+        values = [
+            self.converter.convertValue(
+                self.dbType, self.types[i][0], self.types[i][1], raw_values[i])
+            for i in range(0, len(raw_values))
+        ]
+        return Row(self.columns, values, self.rownumber + 1)
         raise StopIteration()
 
     def next(self):
